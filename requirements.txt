@@ -7,3 +7,4 @@ python-dotenv
 openpyxl
 google-generativeai
 tabulate
+fpdf2
