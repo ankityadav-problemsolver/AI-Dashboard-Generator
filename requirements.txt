@@ -3,8 +3,9 @@ pandas
 numpy
 plotly
 scikit-learn
+prophet
+tensorflow
+pmdarima
 python-dotenv
-openpyxl
 google-generativeai
-tabulate
-fpdf2
+fpdf

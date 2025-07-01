@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,163 +6,151 @@ import plotly.graph_objects as go
 import os
 from dotenv import load_dotenv
 import google.generativeai as genai
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import r2_score, accuracy_score, roc_curve, auc, confusion_matrix
+from prophet import Prophet
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
+from tensorflow.keras.callbacks import EarlyStopping
 from fpdf import FPDF
 import base64
 from io import BytesIO
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-# === Load environment variables ===
+# === ENV & Gemini Setup ===
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+gemini = genai.GenerativeModel("gemini-2.0-flash")
 
-# === Team Login ===
-def login():
-    st.sidebar.header("🔐 Login")
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
-    if st.sidebar.button("Login"):
-        if username == "admin" and password == "pass123":
-            st.session_state.logged_in = True
-        else:
-            st.sidebar.error("Invalid credentials")
+st.set_page_config(page_title="AI Dashboard 🧠", layout="wide")
+st.markdown("# 🔍 Enhanced AI Dashboard with Forecasting & Classification")
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+# === Model Selector ===
+mode = st.sidebar.selectbox("Choose Mode", ["Forecasting", "Classification"])
 
-if not st.session_state.logged_in:
-    login()
+# === File Import ===
+uploaded = st.file_uploader("Upload CSV/Excel", type=["csv","xlsx"])
+if not uploaded:
     st.stop()
 
-# === App Config ===
-st.set_page_config(page_title="📊 Smart AI Dashboard", layout="wide")
-st.markdown("<h1 style='text-align:center;'>📈 Dynamic AI Dashboard Generator</h1>", unsafe_allow_html=True)
+df = pd.read_csv(uploaded) if uploaded.name.endswith("csv") else pd.read_excel(uploaded)
+df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+st.write("### Data Preview", df.head())
 
-# === File Upload ===
-uploaded_file = st.file_uploader("📁 Upload Excel or CSV", type=["csv", "xlsx"])
-df = None
+# === Email Config Notice ===
+if mode == "Forecasting" and (not EMAIL_USER or not EMAIL_PASS):
+    st.warning("⚠️ Set EMAIL_USER & EMAIL_PASS in `.env` to enable email sending.")
 
-if uploaded_file:
-    ext = uploaded_file.name.split(".")[-1]
-    if ext == "csv":
-        df = pd.read_csv(uploaded_file)
+# === Forecasting Workflow ===
+if mode == "Forecasting":
+    # Date detection
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
+    num_cols = df.select_dtypes("number").columns.tolist()
+    metric = st.selectbox("Forecast Metric", num_cols)
+
+    horizon = st.number_input("Forecast Days", value=30, min_value=1)
+    model_choice = st.selectbox("Algo", ["Prophet", "Linear", "RandomForest", "LSTM"])
+
+    df_ts = df[['date', metric]].rename(columns={'date': 'ds', metric: 'y'})
+
+    if model_choice == "Prophet":
+        m = Prophet()
+        m.fit(df_ts)
+        future = m.make_future_dataframe(periods=horizon)
+        fcst = m.predict(future)
+
+    elif model_choice == "Linear":
+        df_ts['days'] = (df_ts['ds'] - df_ts['ds'].min()).dt.days
+        lr = LinearRegression().fit(df_ts[['days']], df_ts['y'])
+        fcst = df_ts.copy()
+        fcst['yhat'] = lr.predict(df_ts[['days']])
+
+    elif model_choice == "RandomForest":
+        df_ts['days'] = (df_ts['ds'] - df_ts['ds'].min()).dt.days
+        rf = RandomForestRegressor().fit(df_ts[['days']], df_ts['y'])
+        fcst = df_ts.copy()
+        fcst['yhat'] = rf.predict(df_ts[['days']])
+
     else:
-        sheet = st.selectbox("📑 Choose a Sheet", pd.ExcelFile(uploaded_file).sheet_names)
-        df = pd.read_excel(uploaded_file, sheet_name=sheet)
+        ts = df_ts['y'].values
+        gen = TimeseriesGenerator(ts, ts, length=10, batch_size=1)
+        model_l = Sequential([LSTM(50, activation='relu', input_shape=(10,1)), Dense(1)])
+        model_l.compile(optimizer='adam', loss='mse')
+        model_l.fit(gen, epochs=10, callbacks=[EarlyStopping(patience=2)])
+        preds = model_l.predict(gen)
+        fcst = df_ts.iloc[10:].copy()
+        fcst['yhat'] = preds.flatten()
 
-    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
-    st.success("✅ File Uploaded and Processed")
+    # Plot results
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=fcst['ds'], y=fcst['y'], name="Actual"))
+    fig.add_trace(go.Scatter(x=fcst['ds'], y=fcst['yhat'], name="Forecast"))
+    st.plotly_chart(fig, use_container_width=True)
 
-    # === Preview Data ===
-    st.subheader("🔍 Data Preview")
-    st.dataframe(df.head(10), use_container_width=True)
+    # Display R² if test data present
+    if 'yhat' in fcst.columns:
+        r2 = r2_score(fcst['y'], fcst['yhat'])
+        st.metric("R² Score", f"{r2:.2f}")
 
-    # === Filters ===
-    if 'brand' in df.columns:
-        brands = df['brand'].dropna().unique()
-        selected = st.multiselect("🔘 Filter by Brand", brands, default=brands)
-        df = df[df['brand'].isin(selected)]
+# === Classification Workflow ===
+else:
+    cat_cols = df.select_dtypes('object').columns.tolist()
+    target = st.selectbox("Target Label", cat_cols)
+    features = st.multiselect("Features", [c for c in df.columns if c != target])
+    if len(features) >= 1:
+        X_train, X_test, y_train, y_test = train_test_split(df[features], df[target], test_size=0.3)
+        clf = RandomForestClassifier().fit(X_train, y_train)
+        preds = clf.predict(X_test)
+        st.metric("Accuracy", accuracy_score(y_test, preds))
 
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
-        df = df.dropna(subset=['date'])
-        date_range = st.date_input("📆 Select Date Range", [df['date'].min(), df['date'].max()])
-        df = df[(df['date'] >= date_range[0]) & (df['date'] <= date_range[1])]
+        # Confusion
+        cm = confusion_matrix(y_test, preds)
+        st.write("Confusion Matrix", cm)
 
-    num_cols = df.select_dtypes(include=["float64", "int64"]).columns.tolist()
-    cat_cols = df.select_dtypes(include=["object"]).columns.tolist()
+        # ROC-AUC
+        if len(np.unique(y_test)) == 2:  # binary
+            probs = clf.predict_proba(X_test)[:,1]
+            fpr, tpr, _ = roc_curve(y_test, probs, pos_label=clf.classes_[1])
+            st.write("ROC-AUC Curve", auc(fpr, tpr))
+            fig_roc = go.Figure()
+            fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines'))
+            fig_roc.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', line=dict(dash='dash')))
+            st.plotly_chart(fig_roc, use_container_width=True)
 
-    # === KPI Cards ===
-    st.subheader("📌 KPIs")
-    k1, k2, k3 = st.columns(3)
-    k1.metric("📄 Total Records", len(df))
-    if num_cols:
-        k2.metric(f"📊 Mean {num_cols[0]}", round(df[num_cols[0]].mean(), 2))
-        k3.metric(f"🔻 Min {num_cols[0]}", round(df[num_cols[0]].min(), 2))
+# === Gemini Email Insights ===
+if st.button("Generate & Send Report"):
+    text = genai.generate_content(f"Provide insights on this dataset: {df.describe().to_markdown()}").text
+    st.write("💡 AI Insights:", text)
 
-    # === Pie Chart ===
-    if cat_cols:
-        pie_data = df[cat_cols[0]].value_counts().head(10)
-        fig_pie = px.pie(values=pie_data.values, names=pie_data.index, title=f"Top {cat_cols[0]} Distribution")
-        st.plotly_chart(fig_pie, use_container_width=True)
+    # Build PDF
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(190, 8, text)
+    buf = BytesIO()
+    pdf.output(buf)
+    buf.seek(0)
 
-    # === Bar Chart ===
-    if len(cat_cols) > 0 and len(num_cols) > 0:
-        avg_df = df.groupby(cat_cols[0])[num_cols[0]].mean().reset_index()
-        fig_bar = px.bar(avg_df, x=cat_cols[0], y=num_cols[0], title=f"{num_cols[0]} by {cat_cols[0]}")
-        st.plotly_chart(fig_bar, use_container_width=True)
+    # Send email
+    if EMAIL_USER and EMAIL_PASS:
+        msg = MIMEMultipart()
+        msg['Subject'] = "Automated Dashboard Report"
+        msg['From'], msg['To'] = EMAIL_USER, EMAIL_USER
+        msg.attach(MIMEText(text, 'plain'))
+        msg.attach(MIMEText(buf.getvalue().decode('latin-1'), 'base64'))
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
+            s.login(EMAIL_USER, EMAIL_PASS)
+            s.send_message(msg)
+        st.success("📧 Report emailed successfully!")
 
-    # === Forecasting with Advanced ML ===
-    if 'date' in df.columns and len(num_cols) > 0:
-        st.subheader("🔮 Advanced Forecasting")
-        forecast_col = st.selectbox("📈 Forecast Column", num_cols)
-        df = df.sort_values("date")
-        df['days'] = (df['date'] - df['date'].min()).dt.days
-        X = df[['days']]
-        y = df[forecast_col]
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        model_rf = RandomForestRegressor()
-        model_rf.fit(X_train, y_train)
-        df['forecast'] = model_rf.predict(X)
-
-        fig_forecast = go.Figure()
-        fig_forecast.add_trace(go.Scatter(x=df['date'], y=df[forecast_col], name="Actual", mode='lines+markers'))
-        fig_forecast.add_trace(go.Scatter(x=df['date'], y=df['forecast'], name="Forecast", mode='lines'))
-        fig_forecast.update_layout(title=f"{forecast_col} Forecast with Random Forest")
-        st.plotly_chart(fig_forecast, use_container_width=True)
-
-        st.info(f"📊 R² Score: {r2_score(y_test, model_rf.predict(X_test)):.2f}")
-
-    # === Export Options ===
-    st.subheader("📤 Export Data")
-    if st.button("📥 Export CSV"):
-        csv = df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="dashboard_data.csv">Download CSV</a>'
-        st.markdown(href, unsafe_allow_html=True)
-
-    if st.button("📄 Export PDF Report"):
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Arial", size=12)
-        for col in df.columns:
-            pdf.cell(200, 10, txt=f"{col}: {df[col].iloc[0]}", ln=True)
-        buffer = BytesIO()
-        pdf.output(buffer)
-        buffer.seek(0)
-        b64 = base64.b64encode(buffer.read()).decode()
-        st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="report.pdf">Download PDF</a>', unsafe_allow_html=True)
-
-    # === Gemini ChatBot ===
-    st.subheader("💬 Chat with your Data")
-    user_query = st.text_area("🧠 Ask Gemini something about your dataset")
-
-    if st.button("🤖 Get Answer"):
-        preview = df.head(10).to_markdown(index=False)
-        describe = df.describe().to_markdown()
-        prompt = f"""
-        You're a data analyst. Answer the question based on this dataset.
-        
-        Sample:
-        {preview}
-        
-        Summary:
-        {describe}
-        
-        Question:
-        {user_query}
-        """
-        try:
-            with st.spinner("Analyzing with Gemini..."):
-                result = model.generate_content(prompt)
-                st.markdown("### 🧠 Gemini's Answer")
-                st.markdown(result.text)
-        except Exception as e:
-            st.error(f"Gemini Error: {e}")
-
-
+st.markdown("---")
+st.info("Deploy on Streamlit Cloud by connecting your repo or use Hugging Face Spaces with `streamlit run app.py`")
