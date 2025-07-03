@@ -5,3 +5,7 @@ requests
 matplotlib
 plotly
 scikit-learn
+python-dotenv
+google-generative-ai
+openpyxl
+fpdf2
