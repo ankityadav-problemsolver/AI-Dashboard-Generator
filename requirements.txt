@@ -1,19 +1,20 @@
-streamlit
-pandas
-numpy
-plotly
-matplotlib
-scikit-learn
-prophet
-pmdarima
-tensorflow
-sqlalchemy
-psycopg2-binary
-requests
-duckdb
-fpdf
-reportlab
-tabulate
-python-dotenv
-google-generativeai
-openpyxl
+# Core & UI
+streamlit==1.32.0
+pandas==2.2.2
+numpy==1.26.4
+python-dotenv==1.0.1
+
+# Data Visualization
+plotly==5.21.0
+matplotlib==3.8.4
+
+# Machine Learning
+scikit-learn==1.4.2
+
+# Google Gemini AI
+google-generativeai==0.5.0
+
+# PDF & Excel Export
+fpdf==1.7.2
+tabulate==0.9.0
+openpyxl==3.1.2

@@ -176,8 +176,12 @@ if uploaded_file:
             pdf.set_font("Arial", size=10)
             for col in df.columns:
                 pdf.cell(200, 8, txt=f"{col}: {df[col].iloc[0]}", ln=True)
+
             buffer = BytesIO()
-            pdf.output(buffer)
+            pdf_bytes = pdf.output(dest='S').encode('latin1')  # ✅ Convert to bytes
+            buffer.write(pdf_bytes)
             buffer.seek(0)
+
             b64 = base64.b64encode(buffer.read()).decode()
             st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="report.pdf">Download PDF</a>', unsafe_allow_html=True)
+
