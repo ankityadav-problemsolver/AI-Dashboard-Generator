@@ -1,2 +1,3 @@
 # Trigger full rebuild
 rebuild
+rebuild
